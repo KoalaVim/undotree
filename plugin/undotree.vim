@@ -133,6 +133,14 @@ if !exists('g:undotree_DiffCommand')
     let g:undotree_DiffCommand = "diff"
 endif
 
+" Optional display command for the diff panel (e.g. "delta").
+" When set, the diff panel becomes a terminal buffer running this command,
+" while g:undotree_DiffCommand is still used internally for parsing.
+" Requires Neovim or Vim with +terminal.
+if !exists('g:undotree_DiffDisplayCommand')
+    let g:undotree_DiffDisplayCommand = ""
+endif
+
 " relative timestamp
 if !exists('g:undotree_RelativeTimestamp')
     let g:undotree_RelativeTimestamp = 1

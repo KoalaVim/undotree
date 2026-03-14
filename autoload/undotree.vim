@@ -1113,12 +1113,25 @@ function! s:diffpanel.Update(seq,targetBufnr,targetid,diffmark) abort
     let self.changes.add = 0
     let self.changes.del = 0
 
+    call self.CleanUpTempFiles()
+
+    let l:cachekey = a:targetBufnr.'_'.a:seq.'_'.a:diffmark
+
     if a:seq == 0
         let diffresult = []
     else
-        if has_key(self.cache,a:targetBufnr.'_'.a:seq.'_'.a:diffmark)
+        if has_key(self.cache, l:cachekey)
             call s:log("diff cache hit.")
-            let diffresult = self.cache[a:targetBufnr.'_'.a:seq.'_'.a:diffmark]
+            if self.useDisplayCmd
+                let diffresult = self.cache[l:cachekey].diffresult
+                let tempfile1 = tempname()
+                let tempfile2 = tempname()
+                call writefile(self.cache[l:cachekey].old, tempfile1)
+                call writefile(self.cache[l:cachekey].new, tempfile2)
+                let self.tempfiles = [tempfile1, tempfile2]
+            else
+                let diffresult = self.cache[l:cachekey]
+            endif
         else
             " Double check the target winnr and bufnr
             let targetWinnr = -1
@@ -1177,42 +1190,92 @@ function! s:diffpanel.Update(seq,targetBufnr,targetid,diffmark) abort
             endif
             let diffresult = split(system(g:undotree_DiffCommand.' '.tempfile1.' '.tempfile2),"\n")
             call s:log("diffresult: ".string(diffresult))
-            if delete(tempfile1) != 0
-                echoerr "Can not delete temp file:".tempfile1
-            endif
-            if delete(tempfile2) != 0
-                echoerr "Can not delete temp file:".tempfile2
+            if self.useDisplayCmd
+                let self.tempfiles = [tempfile1, tempfile2]
+                let self.cache[l:cachekey] = {'diffresult': diffresult, 'old': copy(old), 'new': copy(new)}
+            else
+                if delete(tempfile1) != 0
+                    echoerr "Can not delete temp file:".tempfile1
+                endif
+                if delete(tempfile2) != 0
+                    echoerr "Can not delete temp file:".tempfile2
+                endif
+                let self.cache[l:cachekey] = diffresult
             endif
             let &eventignore = ei_bak
-            "Update cache
-            let self.cache[a:targetBufnr.'_'.a:seq.'_'.a:diffmark] = diffresult
         endif
     endif
 
     call self.ParseDiff(diffresult, a:targetBufnr)
 
+    if self.useDisplayCmd
+        call self.DisplayWithTerminal(a:seq, a:diffmark)
+    else
+        call self.SetFocus()
+
+        setlocal modifiable
+        call s:exec('1,$ d _')
+
+        call append(0,diffresult)
+        if a:diffmark == -1 || a:seq == a:diffmark
+            call append(0,'+ seq: '.a:seq.' +')
+        elseif a:seq > a:diffmark
+            call append(0,'+ seq: '.a:seq.' +')
+            call append(0,'- seq: '.a:diffmark.' -')
+        else
+            call append(0,'+ seq: '.a:diffmark.' +')
+            call append(0,'- seq: '.a:seq.' -')
+        endif
+
+        "remove the last empty line
+        if getline("$") == ""
+            call s:exec('$d _')
+        endif
+        call s:exec('norm! gg') "move cursor to line 1.
+        setlocal nomodifiable
+        call t:undotree.SetFocus()
+    endif
+endfunction
+
+function! s:diffpanel.CleanUpTempFiles() abort
+    for f in self.tempfiles
+        if filereadable(f)
+            call delete(f)
+        endif
+    endfor
+    let self.tempfiles = []
+endfunction
+
+function! s:diffpanel.DisplayWithTerminal(seq, diffmark) abort
     call self.SetFocus()
 
-    setlocal modifiable
-    call s:exec('1,$ d _')
+    let l:old_termbufnr = self.termbufnr
+    let self.termbufnr = -1
 
-    call append(0,diffresult)
-    if a:diffmark == -1 || a:seq == a:diffmark
-        call append(0,'+ seq: '.a:seq.' +')
-    elseif a:seq > a:diffmark
-        call append(0,'+ seq: '.a:seq.' +')
-        call append(0,'- seq: '.a:diffmark.' -')
+    enew
+    if l:old_termbufnr != -1 && bufexists(l:old_termbufnr)
+        silent! execute 'bwipeout! ' . l:old_termbufnr
+    endif
+
+    if empty(self.tempfiles)
+        let self.termbufnr = bufnr('%')
+        let b:isUndotreeBuffer = 1
+        setlocal nobuflisted buftype=nowrite bufhidden=delete nomodifiable
+        call self.BindAu()
+        call t:undotree.SetFocus()
+        return
+    endif
+
+    let l:cmd = g:undotree_DiffDisplayCommand . ' ' . self.tempfiles[0] . ' ' . self.tempfiles[1]
+    if has('nvim')
+        call termopen(l:cmd)
     else
-        call append(0,'+ seq: '.a:diffmark.' +')
-        call append(0,'- seq: '.a:seq.' -')
+        call term_start(l:cmd, {'curwin': 1})
     endif
-
-    "remove the last empty line
-    if getline("$") == ""
-        call s:exec('$d _')
-    endif
-    call s:exec('norm! gg') "move cursor to line 1.
-    setlocal nomodifiable
+    let self.termbufnr = bufnr('%')
+    let b:isUndotreeBuffer = 1
+    setlocal nobuflisted winfixwidth winfixheight nonumber norelativenumber
+    call self.BindAu()
     call t:undotree.SetFocus()
 endfunction
 
@@ -1320,6 +1383,55 @@ function! s:diffpanel.Init() abort
             echoerr '"'.cmd.'" is not executable.'
         endif
     endif
+    let self.useDisplayCmd = 0
+    let self.tempfiles = []
+    let self.termbufnr = -1
+    let self.diffwinid = -1
+    if g:undotree_DiffDisplayCommand != ""
+        let displayexe = matchstr(g:undotree_DiffDisplayCommand.' ', '.\{-}\ze\s.*')
+        if executable(displayexe)
+            if has('nvim') || has('terminal')
+                let self.useDisplayCmd = 1
+            else
+                echoerr 'g:undotree_DiffDisplayCommand requires Neovim or Vim with +terminal.'
+            endif
+        else
+            echoerr '"'.displayexe.'" is not executable.'
+        endif
+    endif
+endfunction
+
+function! s:diffpanel.IsVisible() abort
+    if self.useDisplayCmd && self.diffwinid != -1
+        return win_id2win(self.diffwinid) != 0
+    endif
+    return bufwinnr(self.bufname) != -1 ? 1 : 0
+endfunction
+
+function! s:diffpanel.SetFocus() abort
+    if self.useDisplayCmd && self.diffwinid != -1
+        let winnr = win_id2win(self.diffwinid)
+        if winnr == winnr()
+            return
+        endif
+        if winnr == 0
+            echoerr "Fatal: diff panel window does not exist!"
+            return
+        endif
+        call s:log("diffpanel.SetFocus() winnr:".winnr)
+        call s:exec_silent("norm! ".winnr."\<c-w>\<c-w>")
+        return
+    endif
+    let winnr = bufwinnr(self.bufname)
+    if winnr == winnr()
+        return
+    endif
+    if winnr == -1
+        echoerr "Fatal: window does not exist!"
+        return
+    endif
+    call s:log("SetFocus() winnr:".winnr." bufname:".self.bufname)
+    call s:exec_silent("norm! ".winnr."\<c-w>\<c-w>")
 endfunction
 
 function! s:diffpanel.Toggle() abort
@@ -1353,6 +1465,7 @@ function! s:diffpanel.Show() abort
     endif
     call s:exec_silent(cmd)
 
+    let self.diffwinid = win_getid()
     let b:isUndotreeBuffer = 1
 
     setlocal winfixwidth
@@ -1374,8 +1487,10 @@ function! s:diffpanel.Show() abort
 
     let &eventignore = ei_bak
 
-    " syntax need filetype autocommand
-    setfiletype diff
+    if !self.useDisplayCmd
+        " syntax need filetype autocommand
+        setfiletype diff
+    endif
     setlocal foldcolumn=0
     setlocal nofoldenable
 
@@ -1429,7 +1544,19 @@ function! s:diffpanel.Hide() abort
         return
     endif
     call self.SetFocus()
-    call s:exec("quit")
+    if self.useDisplayCmd
+        if self.termbufnr != -1 && bufexists(self.termbufnr)
+            silent! execute 'bwipeout! ' . self.termbufnr
+            let self.termbufnr = -1
+        endif
+        if win_id2win(self.diffwinid) != 0
+            call s:exec("close!")
+        endif
+        call self.CleanUpTempFiles()
+        let self.diffwinid = -1
+    else
+        call s:exec("quit")
+    endif
     call self.CleanUpHighlight()
 endfunction
 
