@@ -1275,6 +1275,7 @@ function! s:diffpanel.DisplayWithTerminal(seq, diffmark) abort
     let self.termbufnr = bufnr('%')
     let b:isUndotreeBuffer = 1
     setlocal nobuflisted winfixwidth winfixheight nonumber norelativenumber
+    setfiletype undo-diff
     call self.BindAu()
     call t:undotree.SetFocus()
 endfunction
